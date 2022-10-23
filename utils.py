@@ -4,9 +4,8 @@
 """
 
 import numpy as np
-import cv2
-import pyqtgraph as pg
 import pyqtgraph.opengl as pg3
+import cv2
 
 class CameraPoses:
     def __init__(self, intrinsic, orbs=1000, draw_matches=True):
@@ -85,7 +84,10 @@ class CameraPoses:
             if self.draw_matches:
                 matching_result = cv2.drawMatches(self.current_frame, self.current_keypoints, frame, kp, good_matches,
                                                   None, flags=2)
-                cv2.imshow('Matching features', matching_result)
+                original_shape = matching_result.shape
+                new_shape = (int(original_shape[1]*0.3), int(original_shape[0]*0.3))
+                matching_result_downsized = cv2.resize(matching_result, new_shape)
+                cv2.imshow('Matching features', matching_result_downsized)
 
             q1 = np.float32([self.current_keypoints[m.queryIdx].pt for m in good_matches])
             q2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
@@ -111,11 +113,11 @@ class CameraPoses:
     def get_pose(self, q1, q2):
 
         # Essential matrix
-        E, mask = cv2.findEssentialMat(q1, q2, self.K, maxIters=10)
+        E, mask = cv2.findEssentialMat(q1, q2, self.K, method=cv2.RANSAC, prob=0.99)
 
         # Decompose the Essential matrix into R and t
-        R, t = self.decomp_essential_mat(E, q1, q2)
-
+        #R, t = self.decomp_essential_mat(E, q1, q2)
+        retval, R, t, mask = cv2.recoverPose(E, q1, q2, self.K, mask)
         # Get transformation matrix
         transformation_matrix = self._form_transf(R, np.squeeze(t))
 
