@@ -20,7 +20,7 @@ prev_img_shape = None
 
 
 # Extracting path of individual image stored in a given directory
-images = glob.glob(r"C:\Users\magla\Pictures\Phone camera calibration/*.jpg")
+images = glob.glob(r"C:\Users\magla\Pictures\phone3dscanner\calibrations\*.jpg")
 for fname in images:
     img = cv2.imread(fname)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)

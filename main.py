@@ -23,10 +23,12 @@ phone_ips = {'work': "10.0.49.50",
 frame1 = cv2.imread(r"C:\Users\magla\Pictures\PXL_20221023_192919429.jpg")
 frame2 = cv2.imread(r"C:\Users\magla\Pictures\PXL_20221023_192924868.jpg")
 source = 'stream'
-camera_matrix = np.array([[2.248E3, 0.0,     1.347E3],
-                          [0.0,     2.23799E3, 9.93E2],
-                          [0.0,     0.0,     1.0]])
-phone_ip = phone_ips['work']
+
+# Camera matrix made with video resolution of 1280x720
+camera_matrix = np.array([[1.01037E3, 0.0,       6.35476E2],
+                          [0.0,       1.01035E3, 3.54001E2],
+                          [0.0,       0.0,       1.0]])
+phone_ip = phone_ips['home']
 capture_port = 8080
 sensor_port = 5000
 
@@ -56,7 +58,7 @@ while True:
         frame = frame1 if counter % 2 == 0 else frame2
     if ret:
         cv2.imshow("Frame", frame)
-        #camtrack.track(frame)
+        camtrack.track(frame)
         if cv2.waitKey(1) == ord("s"):
             cv2.imwrite(rf"C:\Users\magla\Pictures\phone3dscanner\{counter}.jpg", frame)
     if ret is None:

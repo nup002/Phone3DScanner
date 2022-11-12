@@ -22,9 +22,9 @@ class CameraPoses:
         self.camera_poses = np.zeros((1000, 4, 4))
         self.n_camera_poses = 0
         self.current_pose = np.concatenate((np.identity(3), np.zeros((3, 1))), axis=1)
-        self.current_frame = None
-        self.current_keypoints = None
-        self.current_descriptors = None
+        self.previous_frame = None
+        self.previous_keypoints = None
+        self.previous_descriptors = None
 
         self.draw_matches = draw_matches
 
@@ -44,16 +44,16 @@ class CameraPoses:
             if len(q1) > 20 and len(q2) > 20:
                 try:
                     self.update_pose(q1, q2)
-                    self.current_frame = frame
-                    self.current_keypoints = kp
-                    self.current_descriptors = des
+                    self.previous_frame = frame
+                    self.previous_keypoints = kp
+                    self.previous_descriptors = des
                 except FloatingPointError:
                     pass
 
-        if self.current_frame is None:
-            self.current_frame = frame
-            self.current_keypoints = kp
-            self.current_descriptors = des
+        if self.previous_frame is None:
+            self.previous_frame = frame
+            self.previous_keypoints = kp
+            self.previous_descriptors = des
 
     @staticmethod
     def _form_transf(R, t):
@@ -69,10 +69,11 @@ class CameraPoses:
 
     def get_matches(self, frame, kp, des):
         # Find matches
-        if self.current_frame is not None and len(kp) > 6 and len(self.current_keypoints) > 6:
-            matches = self.flann.knnMatch(self.current_descriptors, des, k=2)
+        if self.previous_frame is not None and len(kp) > 6 and len(self.previous_keypoints) > 6:
+            matches = self.flann.knnMatch(des, self.previous_descriptors, k=2)
             # We could also have used cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-            # Find the matches which do not have a too high distance
+
+            # Only keep the descriptor matches which has a single good match and a single bad match.
             good_matches = []
             try:
                 for m, n in matches:
@@ -82,15 +83,15 @@ class CameraPoses:
                 pass
 
             if self.draw_matches:
-                matching_result = cv2.drawMatches(self.current_frame, self.current_keypoints, frame, kp, good_matches,
+                matching_result = cv2.drawMatches(frame, kp, self.previous_frame, self.previous_keypoints, good_matches,
                                                   None, flags=2)
                 original_shape = matching_result.shape
                 new_shape = (int(original_shape[1]*0.3), int(original_shape[0]*0.3))
                 matching_result_downsized = cv2.resize(matching_result, new_shape)
                 cv2.imshow('Matching features', matching_result_downsized)
 
-            q1 = np.float32([self.current_keypoints[m.queryIdx].pt for m in good_matches])
-            q2 = np.float32([kp[m.trainIdx].pt for m in good_matches])
+            q1 = np.float32([self.previous_keypoints[m.trainIdx].pt for m in good_matches])
+            q2 = np.float32([kp[m.queryIdx].pt for m in good_matches])
         else:
             q1 = q2 = None
         return q1, q2

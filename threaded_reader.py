@@ -149,7 +149,7 @@ class ThreadedVideoCapture:
         frame   : np.ndarray or None.
         """
         try:
-            self._video_queue.get(block=False)
+            return self._video_queue.get(block=False)
         except queue.Empty:
             return False, None
 
