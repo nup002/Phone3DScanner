@@ -4,8 +4,21 @@
 """
 
 import numpy as np
+import numpy.typing as npt
+from typing import Tuple
 import pyqtgraph.opengl as pg3
 import cv2
+import sys
+import random as rand
+
+
+class Cells:
+    def __init__(self):
+        self.pts = np.zeros((0, 2, 2), dtype=np.float32)
+
+    def rand_pt(self):
+        return self.pts[np.random.randint(0, self.pts.shape[0])]
+
 
 class CameraPoses:
     def __init__(self, intrinsic, orbs=1000, draw_matches=True):
@@ -37,13 +50,36 @@ class CameraPoses:
         xgrid.rotate(90, 0, 1, 0)
 
     def track(self, frame):
+        y_bar, x_bar = np.array(frame.shape[:-1]) / 8
+
         # Find the keypoints and descriptors with ORB
         kp, des = self.orb.detectAndCompute(frame, None)
         q1, q2 = self.get_matches(frame, kp, des)
+
         if q1 is not None:
             if len(q1) > 20 and len(q2) > 20:
                 try:
-                    self.update_pose(q1, q2)
+                    # -----> Initialise the grids and points array variables <----- #
+                    grid = np.empty((8, 8), dtype=object)
+
+                    # Place the points q1 and q2 into their respective cells
+                    q1_regularized = np.copy(q1)
+                    q1_regularized[:, 0] /= x_bar
+                    q1_regularized[:, 1] /= y_bar
+                    q1_regularized = q1_regularized.astype(np.int32)
+                    for grid_idx in np.arange(8*8):
+                        h = grid_idx % 8
+                        w = grid_idx // 8
+                        q1_in_grid = np.logical_and(q1_regularized[:, 0] == h, q1_regularized[:, 1] == w)
+                        cell = Cells()
+                        cell.pts = np.stack((q1[q1_in_grid], q2[q1_in_grid]), axis=-1)
+                        grid[h, w] = cell
+
+                    F = self.estimate_fundamental_matrix_RANSAC(q1, q2, grid, 0.05)
+                    E = self.estimate_essential_matrix(self.K, F)
+                    transf = self.transformation_from_essential_mat(E, q1, q2)
+                    #transf = self.get_pose(q1, q2)
+                    self.update_pose(transf)
                     self.previous_frame = frame
                     self.previous_keypoints = kp
                     self.previous_descriptors = des
@@ -86,23 +122,21 @@ class CameraPoses:
                 matching_result = cv2.drawMatches(frame, kp, self.previous_frame, self.previous_keypoints, good_matches,
                                                   None, flags=2)
                 original_shape = matching_result.shape
-                new_shape = (int(original_shape[1]*0.3), int(original_shape[0]*0.3))
+                new_shape = (int(original_shape[1] * 0.3), int(original_shape[0] * 0.3))
                 matching_result_downsized = cv2.resize(matching_result, new_shape)
                 cv2.imshow('Matching features', matching_result_downsized)
 
-            q1 = np.float32([self.previous_keypoints[m.trainIdx].pt for m in good_matches])
-            q2 = np.float32([kp[m.queryIdx].pt for m in good_matches])
+            q1 = np.array([self.previous_keypoints[m.trainIdx].pt for m in good_matches], dtype=np.float32)
+            q2 = np.array([kp[m.queryIdx].pt for m in good_matches], dtype=np.float32)
         else:
             q1 = q2 = None
         return q1, q2
 
-    def update_pose(self, q1, q2):
-        transf = self.get_pose(q1, q2)
+    def update_pose(self, transf):
         with np.errstate(invalid='raise'):
-            self.current_pose = self.current_pose@transf
+            self.current_pose = self.current_pose @ transf
         hom_camera_pose = np.concatenate((self.current_pose, np.array([[0, 0, 0, 1]])), axis=0)
         self._append_to_camera_poses(hom_camera_pose)
-
 
     def _append_to_camera_poses(self, hom_camera_pose: np.ndarray):
         if self.n_camera_poses == self.camera_poses.shape[0]:
@@ -112,12 +146,16 @@ class CameraPoses:
         self.camera_track.setData(pos=self.camera_poses[:self.n_camera_poses, :3, 3])
 
     def get_pose(self, q1, q2):
-
         # Essential matrix
+        q1 = np.float32(q1)
+        q2 = np.float32(q2)
         E, mask = cv2.findEssentialMat(q1, q2, self.K, method=cv2.RANSAC, prob=0.99)
+        transf = self.transformation_from_essential_mat(E, q1, q2, mask)
+        return transf
 
+    def transformation_from_essential_mat(self, E, q1, q2, mask=None):
         # Decompose the Essential matrix into R and t
-        #R, t = self.decomp_essential_mat(E, q1, q2)
+        # R, t = self.decomp_essential_mat(E, q1, q2)
         retval, R, t, mask = cv2.recoverPose(E, q1, q2, self.K, mask)
         # Get transformation matrix
         transformation_matrix = self._form_transf(R, np.squeeze(t))
@@ -245,3 +283,96 @@ class CameraPoses:
         self.world_points.append(Q1)
 
         return [R1, t]
+
+    @staticmethod
+    def estimate_essential_matrix(K: np.array, F: np.array) -> np.array:
+        E = K.T @ F @ K
+        U,S,V = np.linalg.svd(E)
+        S = [[1,0,0],[0,1,0],[0,0,0]]
+        E = U @ S @ V
+        return E
+
+    def estimate_fundamental_matrix_RANSAC(self, q1, q2, grid, epsilon=0.05) -> list:
+        max_inliers = 0
+        fund_mat_best = []
+        confidence = 0.99
+        N = sys.maxsize
+        count = 0
+        ones = np.ones((len(q1), 1))
+        x = np.hstack((q1, ones))
+        x_ = np.hstack((q2, ones))
+        while N > count:
+            x_1, x_2 = self.get_rand8(grid)
+            if x_1 is not None:
+                fund_mat, _ = self.calculate_fundamental_matrix(np.array(x_1), np.array(x_2))
+                e, e_ = x @ fund_mat.T, x_ @ fund_mat
+                error = np.sum(e_ * x, axis=1, keepdims=True) ** 2 / np.sum(np.hstack((e[:, :-1], e_[:, :-1])) ** 2, axis=1,
+                                                                            keepdims=True)
+                inliers = error <= epsilon
+                counter = np.sum(inliers)
+                if max_inliers < counter:
+                    max_inliers = counter
+                    fund_mat_best = fund_mat
+            I_O_ratio = counter / len(q1)
+            if np.log(1 - (I_O_ratio ** 8)) == 0:
+                continue
+            N = np.log(1 - confidence) / np.log(1 - (I_O_ratio ** 8))
+            count += 1
+        return fund_mat_best
+
+    @staticmethod
+    def calculate_fundamental_matrix(pts_cf: np.array, pts_nf: np.array):
+        F_CV, _ = cv2.findFundamentalMat(pts_cf, pts_nf, cv2.FM_8POINT)
+        origin = np.mean(pts_cf, axis=0)
+        origin_ = np.mean(pts_nf, axis=0)
+        k = np.mean(np.sum((pts_cf - origin) ** 2, axis=1, keepdims=True) ** .5)
+        k_ = np.mean(np.sum((pts_nf - origin_) ** 2, axis=1, keepdims=True) ** .5)
+        k = np.sqrt(2.) / k
+        k_ = np.sqrt(2.) / k_
+        x = (pts_cf[:, 0].reshape((-1, 1)) - origin[0]) * k
+        y = (pts_cf[:, 1].reshape((-1, 1)) - origin[1]) * k
+        x_ = (pts_nf[:, 0].reshape((-1, 1)) - origin_[0]) * k_
+        y_ = (pts_nf[:, 1].reshape((-1, 1)) - origin_[1]) * k_
+        A = np.hstack((x_ * x, x_ * y, x_, y_ * x, y_ * y, y_, x, y, np.ones((len(x), 1))))
+        U, S, V = np.linalg.svd(A)
+        F = V[-1]
+        F = np.reshape(F, (3, 3))
+        U, S, V = np.linalg.svd(F)
+        S[2] = 0
+        F = U @ np.diag(S) @ V
+        T1 = np.array([[k, 0, -k * origin[0]], [0, k, -k * origin[1]], [0, 0, 1]])
+        T2 = np.array([[k_, 0, -k_ * origin_[0]], [0, k_, -k_ * origin_[1]], [0, 0, 1]])
+        F = T2.T @ F @ T1
+        F = F / F[-1, -1]
+        return F, F_CV
+
+    @staticmethod
+    def get_rand8(grid: npt.NDArray[Cells]):
+        selected_grid_indexes = np.random.choice(8*8, 8, replace=False)
+        unselected_grid_indexes = np.delete(np.array(np.arange(8*8)), selected_grid_indexes)
+
+        rand8 = np.ndarray(shape=(8, 2), dtype=np.float32)
+        rand8_ = np.ndarray(shape=(8, 2), dtype=np.float32)
+        for n, index in enumerate(selected_grid_indexes):
+            grid_cell = grid[index % 8, index // 8]
+            if grid_cell.pts.shape[0] > 0:
+                pt = grid_cell.rand_pt()
+            else:
+                rand_idx = np.random.randint(0, unselected_grid_indexes.shape[0])
+                index = unselected_grid_indexes[rand_idx]
+                grid_cell = grid[index % 8, index // 8]
+                while grid_cell.pts.shape[0] == 0:
+                    if unselected_grid_indexes.shape[0] > 0:
+                        unselected_grid_indexes = np.delete(unselected_grid_indexes, rand_idx)
+                        rand_idx = np.random.randint(0, unselected_grid_indexes.shape[0])
+                        index = unselected_grid_indexes[rand_idx]
+                        grid_cell = grid[index % 8, index // 8]
+                    else:
+                        rand_idx = np.random.randint(0, selected_grid_indexes.shape[0])
+                        index = selected_grid_indexes[rand_idx]
+                        grid_cell = grid[index % 8, index // 8]
+
+                pt = grid_cell.rand_pt()
+            rand8[n] = pt[:, 0]
+            rand8_[n] = pt[:, 1]
+        return rand8, rand8_
